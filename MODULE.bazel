@@ -1,0 +1,4 @@
+module(
+    name = "agentic_todos_desktop",
+    version = "0.1.0",
+)

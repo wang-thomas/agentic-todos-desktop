@@ -1,0 +1,13 @@
+load("//tools:desktop_runner.bzl", "desktop_runner")
+
+desktop_runner(
+    name = "desktop",
+    local_server_url = "http://localhost:8081/api/v1",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "server",
+    actual = ":desktop",
+    visibility = ["//visibility:public"],
+)
