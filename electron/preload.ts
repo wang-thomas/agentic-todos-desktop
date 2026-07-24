@@ -11,10 +11,13 @@ contextBridge.exposeInMainWorld('agenticTodos', {
     id: string,
     input: { title: string; notes: string; status: 'pending' | 'running' | 'completed' | 'failed' },
   ) => ipcRenderer.invoke('todos:update', id, input),
+  reorderOpenTodos: (todoIDs: string[]) => ipcRenderer.invoke('todos:reorder', todoIDs),
   deleteTodo: (id: string) => ipcRenderer.invoke('todos:delete', id),
   listConnectedAgents: () => ipcRenderer.invoke('connected-agents:list'),
   updateConnectedAgent: (id: 'codex' | 'claude_desktop' | 'perplexity', enabled: boolean) =>
     ipcRenderer.invoke('connected-agents:update', id, enabled),
+  setDefaultConnectedAgent: (id: 'codex' | 'claude_desktop' | 'perplexity') =>
+    ipcRenderer.invoke('connected-agents:set-default', id),
   runTodoWithAgent: (todoID: string, agentID: 'codex' | 'claude_desktop' | 'perplexity') =>
     ipcRenderer.invoke('todos:run-with-agent', todoID, agentID),
 })

@@ -1,13 +1,16 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { DragEvent, FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 type Filter = 'open' | 'running' | 'done'
 type View = 'tasks' | 'connected-agents'
+type DropPlacement = 'before' | 'after'
 
 const filters: Array<{ key: Filter; label: string }> = [
   { key: 'open', label: 'Open' },
   { key: 'running', label: 'Running' },
   { key: 'done', label: 'Done' },
 ]
+
+const reorderThreshold = 0.68
 
 const connectedAgentLabels: Record<ConnectedAgentID, string> = {
   codex: 'Codex',
@@ -33,12 +36,49 @@ function App() {
   const [isSaving, setIsSaving] = useState(false)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   const [runningTodoID, setRunningTodoID] = useState<string | null>(null)
+  const [draggedTodoID, setDraggedTodoID] = useState<string | null>(null)
+  const [dropTargetTodoID, setDropTargetTodoID] = useState<string | null>(null)
+  const [dropPlacement, setDropPlacement] = useState<DropPlacement>('before')
+  const [isReordering, setIsReordering] = useState(false)
   const [runPromptDialog, setRunPromptDialog] = useState<ServerRunPrompt | null>(null)
+  const [detailTodoID, setDetailTodoID] = useState<string | null>(null)
+  const [detailTitle, setDetailTitle] = useState('')
+  const [detailNotes, setDetailNotes] = useState('')
+  const [isSavingDetails, setIsSavingDetails] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const taskNodes = useRef(new Map<string, HTMLElement>())
+  const previousTaskPositions = useRef(new Map<string, DOMRect>())
+  const dragOriginTodos = useRef<ServerTodo[] | null>(null)
+  const liveTodos = useRef<ServerTodo[]>([])
+  const dropHandled = useRef(false)
 
   useEffect(() => {
     void loadSession()
   }, [])
+
+  useLayoutEffect(() => {
+    if (previousTaskPositions.current.size === 0) {
+      return
+    }
+    for (const [todoID, element] of taskNodes.current) {
+      const previous = previousTaskPositions.current.get(todoID)
+      if (!previous) {
+        continue
+      }
+      const next = element.getBoundingClientRect()
+      const deltaY = previous.top - next.top
+      if (deltaY !== 0) {
+        element.animate(
+          [
+            { transform: `translateY(${deltaY}px)` },
+            { transform: 'translateY(0)' },
+          ],
+          { duration: 190, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' },
+        )
+      }
+    }
+    previousTaskPositions.current.clear()
+  }, [todos])
 
   const counts = useMemo(
     () => ({
@@ -136,6 +176,7 @@ function App() {
     setTodos([])
     setConnectedAgents([])
     setDraft('')
+    setDetailTodoID(null)
     setView('tasks')
     setFilter('open')
   }
@@ -146,10 +187,21 @@ function App() {
     }
     setError(null)
     try {
-      const updated = await window.agenticTodos.updateConnectedAgent(agentID, enabled)
-      setConnectedAgents((current) =>
-        current.map((agent) => (agent.id === updated.id ? updated : agent)),
-      )
+      await window.agenticTodos.updateConnectedAgent(agentID, enabled)
+      setConnectedAgents(await window.agenticTodos.listConnectedAgents())
+    } catch (updateError) {
+      setError(messageFrom(updateError))
+    }
+  }
+
+  async function setDefaultConnectedAgent(agentID: ConnectedAgentID) {
+    if (!window.agenticTodos || !user) {
+      return
+    }
+    setError(null)
+    try {
+      await window.agenticTodos.setDefaultConnectedAgent(agentID)
+      setConnectedAgents(await window.agenticTodos.listConnectedAgents())
     } catch (updateError) {
       setError(messageFrom(updateError))
     }
@@ -205,9 +257,193 @@ function App() {
     try {
       await window.agenticTodos.deleteTodo(todoID)
       setTodos((current) => current.filter((todo) => todo.id !== todoID))
+      if (detailTodoID === todoID) {
+        setDetailTodoID(null)
+      }
     } catch (deleteError) {
       setError(messageFrom(deleteError))
     }
+  }
+
+  function openTodoDetails(todo: ServerTodo) {
+    if (draggedTodoID) {
+      return
+    }
+    setDetailTodoID(todo.id)
+    setDetailTitle(todo.title)
+    setDetailNotes(todo.notes)
+    setError(null)
+  }
+
+  function closeTodoDetails() {
+    if (!isSavingDetails) {
+      setDetailTodoID(null)
+    }
+  }
+
+  async function saveTodoDetails(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!window.agenticTodos || !detailTodoID) {
+      return
+    }
+    const todo = todos.find((current) => current.id === detailTodoID)
+    const title = detailTitle.trim()
+    if (!todo || !title) {
+      setError('A task description is required.')
+      return
+    }
+
+    setIsSavingDetails(true)
+    setError(null)
+    try {
+      const updated = await window.agenticTodos.updateTodo(todo.id, {
+        title,
+        notes: detailNotes.trim(),
+        status: todo.status,
+      })
+      replaceTodo(updated)
+      setDetailTitle(updated.title)
+      setDetailNotes(updated.notes)
+      setDetailTodoID(null)
+    } catch (saveError) {
+      setError(messageFrom(saveError))
+    } finally {
+      setIsSavingDetails(false)
+    }
+  }
+
+  async function saveOpenTodoOrder(reorderedTodos: ServerTodo[], previousTodos: ServerTodo[]) {
+    if (!window.agenticTodos || isReordering) {
+      return
+    }
+
+    const openTodoIDs = reorderedTodos
+      .filter((todo) => todo.status === 'pending')
+      .map((todo) => todo.id)
+    const previousOpenTodoIDs = previousTodos
+      .filter((todo) => todo.status === 'pending')
+      .map((todo) => todo.id)
+    if (openTodoIDs.length === 0 || openTodoIDs.every((todoID, index) => todoID === previousOpenTodoIDs[index])) {
+      return
+    }
+
+    setIsReordering(true)
+    setError(null)
+    try {
+      await window.agenticTodos.reorderOpenTodos(openTodoIDs)
+    } catch (reorderError) {
+      captureTaskPositions()
+      liveTodos.current = previousTodos
+      setTodos(previousTodos)
+      setError(messageFrom(reorderError))
+    } finally {
+      setIsReordering(false)
+    }
+  }
+
+  function captureTaskPositions() {
+    previousTaskPositions.current = new Map(
+      Array.from(taskNodes.current, ([todoID, element]) => {
+        element.getAnimations().forEach((animation) => animation.cancel())
+        return [todoID, element.getBoundingClientRect()]
+      }),
+    )
+  }
+
+  function previewOpenTodoOrder(draggedID: string, targetID: string, placement: DropPlacement) {
+    const reorderedTodos = moveOpenTodo(liveTodos.current, draggedID, targetID, placement)
+    if (reorderedTodos === liveTodos.current) {
+      return reorderedTodos
+    }
+    captureTaskPositions()
+    liveTodos.current = reorderedTodos
+    setTodos(reorderedTodos)
+    return reorderedTodos
+  }
+
+  function beginDrag(event: DragEvent<HTMLElement>, todoID: string) {
+    if (isReordering) {
+      event.preventDefault()
+      return
+    }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', todoID)
+    const taskRow = event.currentTarget.closest<HTMLElement>('.task')
+    if (taskRow) {
+      const bounds = taskRow.getBoundingClientRect()
+      event.dataTransfer.setDragImage(taskRow, event.clientX - bounds.left, event.clientY - bounds.top)
+    }
+    dragOriginTodos.current = todos
+    liveTodos.current = todos
+    dropHandled.current = false
+    setDraggedTodoID(todoID)
+  }
+
+  function previewPlacementFor(event: DragEvent<HTMLElement>, sourceID: string, targetID: string): DropPlacement | null {
+    const openTodos = liveTodos.current.filter((todo) => todo.status === 'pending')
+    const sourceIndex = openTodos.findIndex((todo) => todo.id === sourceID)
+    const targetIndex = openTodos.findIndex((todo) => todo.id === targetID)
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+      return null
+    }
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const pointerPosition = (event.clientY - bounds.top) / bounds.height
+    if (sourceIndex < targetIndex) {
+      return pointerPosition >= reorderThreshold ? 'after' : null
+    }
+    return pointerPosition <= 1 - reorderThreshold ? 'before' : null
+  }
+
+  function dragOverTodo(event: DragEvent<HTMLElement>, todoID: string) {
+    if (isReordering) {
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const sourceID = draggedTodoID ?? event.dataTransfer.getData('text/plain')
+    if (!sourceID || sourceID === todoID) {
+      setDropTargetTodoID(null)
+      return
+    }
+    const placement = previewPlacementFor(event, sourceID, todoID)
+    if (!placement) {
+      setDropTargetTodoID(null)
+      return
+    }
+    setDropTargetTodoID(todoID)
+    setDropPlacement(placement)
+    previewOpenTodoOrder(sourceID, todoID, placement)
+  }
+
+  function dropOnTodo(event: DragEvent<HTMLElement>, targetID: string) {
+    event.preventDefault()
+    const sourceID = draggedTodoID ?? event.dataTransfer.getData('text/plain')
+    const previousTodos = dragOriginTodos.current
+    let reorderedTodos = liveTodos.current
+    const placement = sourceID ? previewPlacementFor(event, sourceID, targetID) : null
+    if (sourceID && placement) {
+      reorderedTodos = previewOpenTodoOrder(sourceID, targetID, placement)
+    }
+    dropHandled.current = true
+    setDraggedTodoID(null)
+    setDropTargetTodoID(null)
+    setDropPlacement('before')
+    if (previousTodos) {
+      void saveOpenTodoOrder(reorderedTodos, previousTodos)
+    }
+  }
+
+  function endDrag() {
+    if (!dropHandled.current && dragOriginTodos.current) {
+      captureTaskPositions()
+      liveTodos.current = dragOriginTodos.current
+      setTodos(dragOriginTodos.current)
+    }
+    dragOriginTodos.current = null
+    dropHandled.current = false
+    setDraggedTodoID(null)
+    setDropTargetTodoID(null)
+    setDropPlacement('before')
   }
 
   async function runTodoWithAgent(todoID: string, agentID: ConnectedAgentID) {
@@ -234,6 +470,8 @@ function App() {
   const openCount = counts.open + counts.running
   const completedCount = counts.done
   const enabledAgents = connectedAgents.filter((agent) => agent.enabled)
+  const defaultAgent = enabledAgents.find((agent) => agent.is_default) ?? enabledAgents[0]
+  const detailTodo = todos.find((todo) => todo.id === detailTodoID) ?? null
 
   if (!user) {
     return (
@@ -306,18 +544,12 @@ function App() {
 
         {user ? (
           <div className="account-panel">
-            <p className="section-label">Signed in</p>
-            <strong>{user.display_name}</strong>
-            <span>{user.email}</span>
-          </div>
-        ) : null}
-
-        {user ? (
-          <div className="sidebar-actions">
-            <button className="refresh-button" onClick={() => void loadTodos()} type="button">
-              Refresh
-            </button>
-            <button className="secondary-button" onClick={() => void logout()} type="button">
+            <div className="account-details">
+              <p className="section-label">Signed in</p>
+              <strong>{user.display_name}</strong>
+              <span>{user.email}</span>
+            </div>
+            <button className="account-sign-out" onClick={() => void logout()} type="button">
               Sign out
             </button>
           </div>
@@ -344,21 +576,23 @@ function App() {
               </div>
             </header>
 
-            <form className="quick-add" onSubmit={addTodo}>
-              <span className="plus" aria-hidden="true">
-                +
-              </span>
-              <input
-                aria-label="Add a task"
-                disabled={isSaving}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder="Add a task"
-                value={draft}
-              />
-              <button disabled={isSaving} type="submit">
-                {isSaving ? 'Adding' : 'Add'}
-              </button>
-            </form>
+            {filter === 'open' ? (
+              <form className="quick-add" onSubmit={addTodo}>
+                <span className="plus" aria-hidden="true">
+                  +
+                </span>
+                <input
+                  aria-label="Add a task"
+                  disabled={isSaving}
+                  onChange={(event) => setDraft(event.target.value)}
+                  placeholder="Add a task"
+                  value={draft}
+                />
+                <button disabled={isSaving} type="submit">
+                  {isSaving ? 'Adding' : 'Add'}
+                </button>
+              </form>
+            ) : null}
 
             {error ? (
               <div className="notice" role="alert">
@@ -367,7 +601,13 @@ function App() {
               </div>
             ) : null}
 
-            <div className="task-list" aria-label={`${filter} tasks`}>
+            <div className={filter === 'open' ? 'task-list reorderable' : 'task-list'} aria-label={`${filter} tasks`}>
+              {filter === 'open' && visibleTodos.length > 1 ? (
+                <div className="reorder-hint">
+                  <span className="reorder-hint-label">Priority order</span>
+                  <span>Drag the grip to set what comes next</span>
+                </div>
+              ) : null}
               {isLoading ? (
                 <div className="empty-state">
                   <h3>Loading tasks</h3>
@@ -377,21 +617,58 @@ function App() {
 
               {!isLoading
                 ? visibleTodos.map((todo) => (
-                    <article className={todo.status === 'completed' ? 'task completed' : 'task'} key={todo.id}>
+                    <article
+                      className={`${todo.status === 'completed' ? 'task completed' : 'task'}${
+                        dropTargetTodoID === todo.id ? ` drop-${dropPlacement}` : ''
+                      }${draggedTodoID === todo.id ? ' dragging' : ''}${
+                        todo.status === 'pending' ? ' reorderable-task' : ' static-task'
+                      }${openRunMenuTodoID === todo.id ? ' menu-open' : ''}`}
+                      key={todo.id}
+                      onClick={() => openTodoDetails(todo)}
+                      onDragOver={todo.status === 'pending' ? (event) => dragOverTodo(event, todo.id) : undefined}
+                      onDrop={todo.status === 'pending' ? (event) => dropOnTodo(event, todo.id) : undefined}
+                      ref={(element) => {
+                        if (element) {
+                          taskNodes.current.set(todo.id, element)
+                        } else {
+                          taskNodes.current.delete(todo.id)
+                        }
+                      }}
+                    >
+                      {todo.status === 'pending' ? (
+                        <button
+                          aria-label={`Drag to reorder ${todo.title}`}
+                          className="drag-handle"
+                          draggable={!isReordering}
+                          onClick={(event) => event.stopPropagation()}
+                          onDragEnd={endDrag}
+                          onDragStart={(event) => beginDrag(event, todo.id)}
+                          type="button"
+                        >
+                          <span className="grip-dots" aria-hidden="true">
+                            <i />
+                            <i />
+                            <i />
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        </button>
+                      ) : null}
                       <button
                         aria-label={
                           todo.status === 'completed' ? `Mark ${todo.title} open` : `Mark ${todo.title} done`
                         }
                         className="check-button"
-                        onClick={() => void toggleTodo(todo)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void toggleTodo(todo)
+                        }}
                         type="button"
-                      >
-                        {todo.status === 'completed' ? '✓' : ''}
-                      </button>
+                      />
                       <div className="task-main">
                         <h3>{todo.title}</h3>
                         <div className="task-meta">
-                          <span>{todo.notes || 'No notes'}</span>
                           <span>{formatDate(todo.updated_at)}</span>
                         </div>
                       </div>
@@ -399,18 +676,30 @@ function App() {
                         <span className={`priority ${todo.status}`}>{todo.status}</span>
                       ) : null}
                       {todo.status === 'pending' ? (
-                        <div className="run-task-menu">
-                          <button
-                            className="run-task-button"
-                            disabled={runningTodoID === todo.id}
-                            onClick={() =>
-                              setOpenRunMenuTodoID((current) => (current === todo.id ? null : todo.id))
-                            }
-                            type="button"
-                          >
-                            <span>{runningTodoID === todo.id ? 'Opening' : 'Run task'}</span>
-                            <span className="run-task-caret" aria-hidden="true" />
-                          </button>
+                        <div className="run-task-menu" onClick={(event) => event.stopPropagation()}>
+                          <div className="run-task-split">
+                            <button
+                              className="run-task-button run-task-begin"
+                              disabled={runningTodoID === todo.id || !defaultAgent}
+                              onClick={() => defaultAgent && void runTodoWithAgent(todo.id, defaultAgent.id)}
+                              title={defaultAgent ? `Begin with ${connectedAgentLabels[defaultAgent.id]}` : 'Choose a default connected agent'}
+                              type="button"
+                            >
+                              {runningTodoID === todo.id ? 'Opening' : 'Begin'}
+                            </button>
+                            <button
+                              aria-expanded={openRunMenuTodoID === todo.id}
+                              aria-label={`Choose an agent for ${todo.title}`}
+                              className="run-task-button run-task-dropdown"
+                              disabled={runningTodoID === todo.id}
+                              onClick={() =>
+                                setOpenRunMenuTodoID((current) => (current === todo.id ? null : todo.id))
+                              }
+                              type="button"
+                            >
+                              <span className="run-task-caret" aria-hidden="true" />
+                            </button>
+                          </div>
                           {openRunMenuTodoID === todo.id ? (
                             <div className="run-task-options">
                               {enabledAgents.length > 0 ? (
@@ -420,7 +709,7 @@ function App() {
                                     onClick={() => void runTodoWithAgent(todo.id, agent.id)}
                                     type="button"
                                   >
-                                    {connectedAgentLabels[agent.id]}
+                                    {connectedAgentLabels[agent.id]}{agent.id === defaultAgent?.id ? ' · Default' : ''}
                                   </button>
                                 ))
                               ) : (
@@ -460,22 +749,80 @@ function App() {
 
             <div className="agent-selector-list">
               {connectedAgents.map((agent) => (
-                <label className="agent-selector-row" key={agent.id}>
+                <div className="agent-selector-row" key={agent.id}>
                   <div>
                     <strong>{connectedAgentLabels[agent.id]}</strong>
                     <span>{connectedAgentDescriptions[agent.id]}</span>
                   </div>
-                  <input
-                    checked={agent.enabled}
-                    onChange={(event) => void toggleConnectedAgent(agent.id, event.target.checked)}
-                    type="checkbox"
-                  />
-                </label>
+                  <div className="agent-selector-actions">
+                    <button
+                      className={agent.id === defaultAgent?.id ? 'default-agent-button selected' : 'default-agent-button'}
+                      disabled={!agent.enabled || agent.id === defaultAgent?.id}
+                      onClick={() => void setDefaultConnectedAgent(agent.id)}
+                      type="button"
+                    >
+                      {agent.id === defaultAgent?.id ? 'Default' : 'Make default'}
+                    </button>
+                    <label className="agent-enabled-toggle">
+                      <span className="sr-only">Enable {connectedAgentLabels[agent.id]}</span>
+                      <input
+                        checked={agent.enabled}
+                        onChange={(event) => void toggleConnectedAgent(agent.id, event.target.checked)}
+                        type="checkbox"
+                      />
+                    </label>
+                  </div>
+                </div>
               ))}
             </div>
           </section>
         )}
       </section>
+
+      {detailTodo ? (
+        <div className="task-details-layer">
+          <button aria-label="Close task details" className="task-details-backdrop" onClick={closeTodoDetails} type="button" />
+          <aside aria-labelledby="task-details-title" aria-modal="true" className="task-details-panel" role="dialog">
+            <header className="task-details-header">
+              <div>
+                <p className="eyebrow">Task details</p>
+                <h2 id="task-details-title">Edit task</h2>
+              </div>
+              <button aria-label="Close task details" className="task-details-close" onClick={closeTodoDetails} type="button" />
+            </header>
+
+            <form className="task-details-form" onSubmit={saveTodoDetails}>
+              <label>
+                <span>Task description</span>
+                <input
+                  disabled={isSavingDetails}
+                  onChange={(event) => setDetailTitle(event.target.value)}
+                  value={detailTitle}
+                />
+              </label>
+              <label>
+                <span>Notes for your agent</span>
+                <textarea
+                  disabled={isSavingDetails}
+                  onChange={(event) => setDetailNotes(event.target.value)}
+                  placeholder="Add context, constraints, links, or success criteria…"
+                  rows={10}
+                  value={detailNotes}
+                />
+              </label>
+              <p className="task-details-note">Notes are included when you begin this task with an agent.</p>
+              <div className="task-details-actions">
+                <button className="secondary-button" disabled={isSavingDetails} onClick={closeTodoDetails} type="button">
+                  Cancel
+                </button>
+                <button className="task-details-save" disabled={isSavingDetails} type="submit">
+                  {isSavingDetails ? 'Saving' : 'Save changes'}
+                </button>
+              </div>
+            </form>
+          </aside>
+        </div>
+      ) : null}
 
       {runPromptDialog ? (
         <div
@@ -531,6 +878,29 @@ function formatDate(value: string) {
     hour: 'numeric',
     minute: '2-digit',
   }).format(date)
+}
+
+function moveOpenTodo(
+  todos: ServerTodo[],
+  draggedID: string,
+  targetID: string,
+  placement: DropPlacement,
+): ServerTodo[] {
+  const openTodos = todos.filter((todo) => todo.status === 'pending')
+  const draggedIndex = openTodos.findIndex((todo) => todo.id === draggedID)
+  const targetIndex = openTodos.findIndex((todo) => todo.id === targetID)
+  if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) {
+    return todos
+  }
+
+  const reorderedOpenTodos = [...openTodos]
+  const [draggedTodo] = reorderedOpenTodos.splice(draggedIndex, 1)
+  let insertionIndex = targetIndex + (placement === 'after' ? 1 : 0)
+  if (draggedIndex < insertionIndex) {
+    insertionIndex -= 1
+  }
+  reorderedOpenTodos.splice(insertionIndex, 0, draggedTodo)
+  return [...reorderedOpenTodos, ...todos.filter((todo) => todo.status !== 'pending')]
 }
 
 export default App

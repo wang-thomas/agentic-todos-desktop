@@ -28,6 +28,7 @@ type ConnectedAgentID = 'codex' | 'claude_desktop' | 'perplexity'
 type ServerConnectedAgent = {
   id: ConnectedAgentID
   enabled: boolean
+  is_default: boolean
   updated_at: string
 }
 
@@ -54,9 +55,11 @@ interface Window {
       id: string,
       input: { title: string; notes: string; status: TodoStatus },
     ) => Promise<ServerTodo>
+    reorderOpenTodos: (todoIDs: string[]) => Promise<void>
     deleteTodo: (id: string) => Promise<void>
     listConnectedAgents: () => Promise<ServerConnectedAgent[]>
     updateConnectedAgent: (id: ConnectedAgentID, enabled: boolean) => Promise<ServerConnectedAgent>
+    setDefaultConnectedAgent: (id: ConnectedAgentID) => Promise<ServerConnectedAgent>
     runTodoWithAgent: (todoID: string, agentID: ConnectedAgentID) => Promise<ServerRunPrompt>
   }
 }

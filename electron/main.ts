@@ -36,6 +36,7 @@ type ConnectedAgentID = 'codex' | 'claude_desktop' | 'perplexity'
 type ConnectedAgent = {
   id: ConnectedAgentID
   enabled: boolean
+  is_default: boolean
   updated_at: string
 }
 
@@ -183,6 +184,17 @@ async function updateTodo(id: string, input: UpdateTodoInput): Promise<Todo> {
   )
 }
 
+async function reorderOpenTodos(todoIDs: string[]): Promise<void> {
+  await apiRequest<void>(
+    '/todos/reorder',
+    {
+      method: 'POST',
+      body: JSON.stringify({ todo_ids: todoIDs }),
+    },
+    { auth: true },
+  )
+}
+
 async function deleteTodo(id: string): Promise<void> {
   await apiRequest<void>(`/todos/${id}`, { method: 'DELETE' }, { auth: true })
 }
@@ -197,6 +209,16 @@ async function updateConnectedAgent(id: ConnectedAgentID, enabled: boolean): Pro
     {
       method: 'PATCH',
       body: JSON.stringify({ enabled }),
+    },
+    { auth: true },
+  )
+}
+
+async function setDefaultConnectedAgent(id: ConnectedAgentID): Promise<ConnectedAgent> {
+  return apiRequest<ConnectedAgent>(
+    `/connected-agents/${id}/default`,
+    {
+      method: 'PATCH',
     },
     { auth: true },
   )
@@ -317,11 +339,13 @@ app.whenReady().then(() => {
   ipcMain.handle('todos:list', () => listTodos())
   ipcMain.handle('todos:create', (_event, input: CreateTodoInput) => createTodo(input))
   ipcMain.handle('todos:update', (_event, id: string, input: UpdateTodoInput) => updateTodo(id, input))
+  ipcMain.handle('todos:reorder', (_event, todoIDs: string[]) => reorderOpenTodos(todoIDs))
   ipcMain.handle('todos:delete', (_event, id: string) => deleteTodo(id))
   ipcMain.handle('connected-agents:list', () => listConnectedAgents())
   ipcMain.handle('connected-agents:update', (_event, id: ConnectedAgentID, enabled: boolean) =>
     updateConnectedAgent(id, enabled),
   )
+  ipcMain.handle('connected-agents:set-default', (_event, id: ConnectedAgentID) => setDefaultConnectedAgent(id))
   ipcMain.handle('todos:run-with-agent', (_event, todoID: string, agentID: ConnectedAgentID) =>
     runTodoWithAgent(todoID, agentID),
   )
