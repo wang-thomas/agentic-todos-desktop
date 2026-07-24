@@ -17,6 +17,7 @@
   "build": {
     "appId": "com.agentictodos.desktop",
     "productName": "Agentic Todos",
+    "icon": "build/bee.png",
     "directories": {
       "output": "release"
     },

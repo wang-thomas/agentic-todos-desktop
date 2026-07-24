@@ -11,6 +11,7 @@ const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL)
 const apiBaseURL =
   process.env.AGENTIC_TODOS_SERVER_URL ?? 'https://agentic-todos-server-production.up.railway.app/api/v1'
 const execFileAsync = promisify(execFile)
+const developmentIconPath = path.join(__dirname, '../build/bee.png')
 
 type User = {
   id: string
@@ -301,6 +302,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 620,
     title: 'Agentic Todos',
+    icon: isDevelopment ? developmentIconPath : undefined,
     backgroundColor: '#f7f3ec',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
@@ -327,6 +329,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (isDevelopment && process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(developmentIconPath)
+  }
   ipcMain.handle('app-info', () => ({
     name: 'Agentic Todos Desktop',
     version: '0.1.0',
